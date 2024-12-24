@@ -1,4 +1,4 @@
-# ultraml: a simple package for preparing ultrasound data for ML 
+# ultraml: a simple package for ultrasound ML data preprocessing 
 
 
 ## Installation
