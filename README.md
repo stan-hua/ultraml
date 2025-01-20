@@ -1,5 +1,9 @@
-# ultraml: a package to simplify ultrasound ML data pre-processing
+# ultraml: a simple package for ultrasound ML data preprocessing 
 
+## Example Usage
+| Before | After | Extracted Background |
+|--------|-------|-------|
+| ![aorta-0](https://github.com/user-attachments/assets/970f60ad-4d94-45a2-b242-509d43279921) | ![extracted_aorta-0](https://github.com/user-attachments/assets/4c05a588-96be-461d-92bd-8defeb42181d) | ![pocus_atlas-aorta-1-background](https://github.com/user-attachments/assets/307bf44c-0c70-431e-b31f-4bd7419c9954) |
 
 ## Installation
 1. Pip
