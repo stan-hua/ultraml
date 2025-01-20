@@ -135,12 +135,14 @@ def convert_video_to_frames(
         if background_img.sum() >= 25:
             os.makedirs(os.path.dirname(background_save_path), exist_ok=True)
             cv2.imwrite(background_save_path, background_img)
+        else:
+            background_save_path = None
 
     return img_save_paths, background_save_path
 
 
 def convert_dicom_to_frames(
-        path, save_dir, prefix_fname="",
+        path, save_dir, 
         uniform_num_samples=-1,
         background_save_path=None,
         bg_min_pixels=25,
