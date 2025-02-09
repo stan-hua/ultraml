@@ -568,19 +568,51 @@ def create_tight_crop(image):
         Coordinates to get the tightest crop (y_min, y_max, x_min, x_max)
         Returns (None, None, None, None) if image has no active pixel
     """
-    # Find the coordinates of non-zero pixels
-    non_zero_coords = np.argwhere(image > 0)
-
     # Early return, if image is empty
-    if len(non_zero_coords) == 0:
+    if not (image > 0).any():
         return None, None, None, None
 
-    # Get the bounding box of the non-zero pixels
-    top_left = non_zero_coords.min(axis=0)
-    bottom_right = non_zero_coords.max(axis=0)
-    # Crop the image using the bounding box coordinates
-    y_min, y_max, x_min, x_max = top_left[0], bottom_right[0]+1, top_left[1], bottom_right[1]+1
+    # Get row and columns with longest consecutive groups of non-zero pixels
+    row_pixel_counts = np.sum(image > 0, axis=1)
+    col_pixel_counts = np.sum(image > 0, axis=0)
+    y_min, y_max = get_longest_consecutive_group(row_pixel_counts)
+    x_min, x_max = get_longest_consecutive_group(col_pixel_counts)
+
+    # If no valid crop, return None
+    if (y_min == y_max) or (x_min == x_max):
+        return None, None, None, None
     return y_min, y_max, x_min, x_max
+
+
+def get_longest_consecutive_group(pixel_counts):
+    """
+    Get indices of longest consecutive group of non-zero pixels.
+
+    Parameters
+    ----------
+    pixel_counts : list-like
+        List of pixel counts along row/column
+
+    Returns
+    -------
+    tuple of ints
+        (start_idx, end_idx) of longest consecutive group
+    """
+    max_len = 0
+    current_len = 0
+    max_start = 0
+    current_start = 0
+    for i, count in enumerate(pixel_counts):
+        if count > 0:
+            if current_len == 0:
+                current_start = i
+            current_len += 1
+            if current_len > max_len:
+                max_len = current_len
+                max_start = current_start
+        else:
+            current_len = 0
+    return max_start, max_start + max_len
 
 
 ################################################################################
