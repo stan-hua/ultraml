@@ -56,19 +56,26 @@ def convert_video_to_frames(
         (i) Paths to saved image frames
         (ii) Path to saved background image, or None if not saved
     """
-    #  Default keyword arguments for processing images
-    process_kwargs = {
+    #  Default keyword arguments for processing frames
+    img_process_kwargs = {
         "grayscale": False,
         "extract_beamform": True,
         "crop": False,
         "apply_filter": False,
     }
-    process_kwargs.update(kwargs)
+    img_process_kwargs.update(kwargs)
+
+    # Keyword arguments for processing videos
+    video_process_kwargs = {
+        "apply_filter": True,
+        "crop": True,
+    }
+    video_process_kwargs.update({k:v for k,v in kwargs.items() if k in video_process_kwargs})
 
     # Local function to process image frame
     def process_frame(idx, img_arr):
         curr_save_path = f"{save_dir}/{prefix_fname}{idx}.png"
-        processed_image = preprocess_and_save_img_array(img_arr, **process_kwargs)
+        processed_image = preprocess_and_save_img_array(img_arr, **img_process_kwargs)
         return curr_save_path, processed_image
 
     os.makedirs(save_dir, exist_ok=True)
@@ -116,11 +123,11 @@ def convert_video_to_frames(
     # Separate out ultrasound & non-ultrasound part of sequence
     # CASE 1: Only 1 image frame
     if len(accum_imgs) == 1:
-        foreground, static_mask = extract_ultrasound_image_foreground(accum_imgs[0])
+        foreground, static_mask = extract_ultrasound_image_foreground(accum_imgs[0], **video_process_kwargs)
         foreground = [foreground]
     # CASE 2: Video
     else:
-        foreground, static_mask = extract_ultrasound_video_foreground(np.array(accum_imgs))
+        foreground, static_mask = extract_ultrasound_video_foreground(np.array(accum_imgs), **video_process_kwargs)
 
     # Save extracted ultrasound part to save paths
     for image_idx, save_img_path in enumerate(img_save_paths):
@@ -180,11 +187,18 @@ def convert_dicom_to_frames(
         (i) Paths to saved image frames
         (ii) Path to saved background image, or None if not saved
     """
-    #  Default keyword arguments for processing images
-    process_kwargs = {
+    # Default keyword arguments for processing each frame
+    img_process_kwargs = {
         "grayscale": True,
     }
-    process_kwargs.update(kwargs)
+    img_process_kwargs.update(kwargs)
+
+    # Keyword arguments for processing videos
+    video_process_kwargs = {
+        "apply_filter": True,
+        "crop": True,
+    }
+    video_process_kwargs.update({k:v for k,v in kwargs.items() if k in video_process_kwargs})
 
     # Lazy import to speed up file loading
     try:
@@ -218,9 +232,10 @@ def convert_dicom_to_frames(
 
         # Preprocess image and save to path
         preprocess_and_save_img_array(
-            img_arr, grayscale,
+            img_arr,
             save_path=f"{save_dir}/{prefix_fname}1.png",
             background_save_path=background_save_path,
+            **img_process_kwargs,
         )
 
     # CASE 2: A sequence of image frames
@@ -243,11 +258,11 @@ def convert_dicom_to_frames(
     # Separate out ultrasound & non-ultrasound part of sequence
     # CASE 1: Only 1 image frame
     if len(accum_imgs) == 1:
-        foreground, static_mask = extract_ultrasound_image_foreground(accum_imgs[0])
+        foreground, static_mask = extract_ultrasound_image_foreground(accum_imgs[0], **video_process_kwargs)
         foreground = [foreground]
     # CASE 2: Video
     else:
-        foreground, static_mask = extract_ultrasound_video_foreground(np.array(accum_imgs))
+        foreground, static_mask = extract_ultrasound_video_foreground(np.array(accum_imgs), **video_process_kwargs)
 
     # Save extracted ultrasound part to save paths
     for image_idx, save_img_path in enumerate(img_save_paths):
