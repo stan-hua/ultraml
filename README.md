@@ -7,12 +7,12 @@
 
 ## Installation
 1. Pip
-```
+```bash
 pip install ultraml
 ```
 
 2. Local Clone
-```
+```bash
 git clone https://github.com/stan-hua/ultraml.git
 cd ultraml
 pip install -e .
@@ -22,7 +22,7 @@ pip install -e .
 ---
 ## Example Usages
 ### 1. (File-Level) Pre-process ultrasound video to individual image frames
-```
+```python
 from ultraml import convert_video_to_frames
 video_path = "path/to/video.mp4"
 video_save_dir = "path/to/save/frames"
@@ -39,7 +39,7 @@ print(f"Background Saved = {background_save_path is not None}")
 ```
 
 ### 2. (File-Level) Pre-process ultrasound beamform to individual image frames
-```
+```python
 # If handling DICOMs, please install pydicom with `pip install pydicom`
 from ultraml import convert_dicom_to_frames
 dicom_path = "path/to/dicom.dcm"
@@ -59,7 +59,7 @@ print(f"Background Saved = {background_save_path is not None}")
 ```
 
 ### 3. (Array-Level) Extract beamform from a video (list of images)
-```
+```python
 from ultraml import extract_ultrasound_video_foreground, convert_img_to_uint8
 video_frames_arr = ...        # list of numpy image arrays
 ultrasound_foreground, static_mask = extract_ultrasound_video_foreground(
@@ -77,7 +77,7 @@ background_img[~static_mask] = 0
 ```
 
 ### 4. (Array-Level) Extract ultrasound from a single image
-```
+```python
 from ultraml import extract_ultrasound_image_foreground
 img_arr = ...               # single numpy image array
 ultrasound_foreground, static_mask = extract_ultrasound_image_foreground(
