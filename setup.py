@@ -6,9 +6,9 @@ setup(
     packages=find_packages(),
     install_requires=[
         "fire",
+        "joblib",
         "opencv-python",
         "numpy",
-        "scikit-learn",
         "tqdm",
     ],
     entry_points={
