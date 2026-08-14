@@ -8,14 +8,21 @@ Description: Contains helper functions to extract ultrasound beamforms from
 # Standard libraries
 import logging
 import os
-from collections import deque
-from joblib import Parallel, delayed
 
 # Non-standard libraries
 import cv2
 import numpy as np
-from sklearn.utils import shuffle
+from joblib import Parallel, delayed
 from tqdm import tqdm
+
+
+class EmptyMaskError(ValueError):
+    """No ultrasound region could be found in the image or sequence.
+
+    Raised rather than returning a blank frame, because an all-zero result is
+    indistinguishable from a legitimately dark scan and silently poisons a
+    dataset with blank samples.
+    """
 
 
 ################################################################################
@@ -389,7 +396,96 @@ def is_image_dark(img_arr):
     return np.mean(img_arr < 30) >= 0.60
 
 
-def extract_ultrasound_video_foreground(img_sequence, apply_filter=True, crop=True):
+def compute_ultrasound_video_mask(
+    img_sequence,
+    apply_filter=True,
+    std_threshold=5,
+    intensity_threshold=15,
+    blur_size=5,
+):
+    """
+    Locate the ultrasound beamform in a video, without modifying any pixels.
+
+    The beamform moves between frames while overlaid text and chrome do not,
+    so per-pixel variation over time separates the two. Returning geometry
+    rather than a modified copy lets a caller store one box per clip and apply
+    it lazily, which matters when the alternative is materialising every frame.
+
+    Parameters
+    ----------
+    img_sequence : np.ndarray
+        Image sequence of shape (T, H, W, C) or (T, H, W)
+    apply_filter : bool, optional
+        If True, apply median blur to close gaps and drop speckle
+    std_threshold : int, optional
+        Per-pixel standard deviation over time at or above which a pixel
+        counts as moving. Heuristic; tune it and log what you used.
+    intensity_threshold : int, optional
+        Brightness above which a pixel may be absorbed into the mask when it
+        is connected to a moving one
+    blur_size : int, optional
+        Median blur kernel size, odd
+
+    Returns
+    -------
+    (np.ndarray, tuple of int)
+        (i) Boolean mask of shape (H, W), True over the ultrasound region
+        (ii) Tightest bounding box as (y_min, y_max, x_min, x_max)
+
+    Raises
+    ------
+    EmptyMaskError
+        If nothing in the sequence moves, or the mask has no extent. A frozen
+        clip and a still image both land here.
+    """
+    img_sequence = np.asarray(img_sequence).astype(np.uint8)
+
+    # Judge motion on luminance; colour flow overlays should not decide where
+    # the beamform is.
+    if img_sequence.ndim == 4 and img_sequence.shape[3] == 3:
+        luma = np.stack(
+            [cv2.cvtColor(frame, cv2.COLOR_RGB2GRAY) for frame in img_sequence],
+            axis=0,
+        )
+    else:
+        luma = img_sequence
+
+    dynamic_mask = (np.std(luma, axis=0) >= std_threshold)
+    if not dynamic_mask.any():
+        raise EmptyMaskError(
+            "No pixel varies across the sequence, so no ultrasound region "
+            "could be found. The clip is frozen, or a single repeated frame."
+        )
+    dynamic_mask = (255 * dynamic_mask).astype(np.uint8)
+
+    # Use maximum pixel intensity to fill in the mask
+    # NOTE: Bright pixels by the mask should be included
+    dynamic_mask = fill_mask(
+        luma.max(0), dynamic_mask, intensity_threshold=intensity_threshold
+    )
+
+    # If specified, use median blur filter to fill in the gaps and remove noise
+    if apply_filter:
+        dynamic_mask = cv2.medianBlur(dynamic_mask, blur_size)
+        # Convert back to binary mask
+        dynamic_mask = (255 * (dynamic_mask > 0)).astype(np.uint8)
+
+    bbox = create_tight_crop(dynamic_mask)
+    if bbox[0] is None:
+        raise EmptyMaskError(
+            "The ultrasound region has no extent after filtering, so there is "
+            "nothing to crop to."
+        )
+    return dynamic_mask.astype(bool), bbox
+
+
+def extract_ultrasound_video_foreground(
+    img_sequence,
+    apply_filter=True,
+    crop=True,
+    keep_color=False,
+    **mask_kwargs,
+):
     """
     Split ultrasound video into foreground (ultrasound beamform) and background
     (unecessary static parts).
@@ -402,55 +498,49 @@ def extract_ultrasound_video_foreground(img_sequence, apply_filter=True, crop=Tr
         If True, apply median blur filter to image
     crop : bool, optional
         If True, return cropped image
+    keep_color : bool, optional
+        If True, keep the input's channels instead of collapsing to grayscale.
+        Needed for colour Doppler, where the flow overlay is the signal.
+    **mask_kwargs
+        Passed to :func:`compute_ultrasound_video_mask`
 
     Returns
     -------
     (np.ndarray, np.ndarray)
-        (i) Ultrasound video with beamform extracted of shape (T, H, W), where
-            H and W can be smaller due to cropping
+        (i) Ultrasound video with beamform extracted, of shape (T, H, W) or
+            (T, H, W, C) when ``keep_color``. H and W can be smaller due to
+            cropping
         (ii) Boolean mask of shape (H, W) that highlights static parts of video
              frames that denote the background
+
+    Raises
+    ------
+    EmptyMaskError
+        If no ultrasound region could be found
     """
-    img_sequence = img_sequence.astype(np.uint8)
+    img_sequence = np.asarray(img_sequence).astype(np.uint8)
+    dynamic_mask, (y_min, y_max, x_min, x_max) = compute_ultrasound_video_mask(
+        img_sequence, apply_filter=apply_filter, **mask_kwargs
+    )
 
-    # Convert to grayscale
-    if len(img_sequence.shape) == 4 and img_sequence.shape[3] == 3:
-        grayscale_imgs = []
-        for idx in range(len(img_sequence)):
-            grayscale_imgs.append(cv2.cvtColor(img_sequence[idx], cv2.COLOR_RGB2GRAY))
-        img_sequence = np.stack(grayscale_imgs, axis=0)
-
-    # Create mask of shape (H, W) that indicates parts of image with no variation
-    dynamic_mask = (np.std(img_sequence, axis=0) >= 5)
-    dynamic_mask = (255*dynamic_mask).astype(np.uint8)
-
-    # Use maximum pixel intensity to fill in the mask
-    # NOTE: Bright pixels by the mask should be included
-    max_img = img_sequence.max(0)
-    dynamic_mask = fill_mask(max_img, dynamic_mask, intensity_threshold=15)
-
-    # If specified, use median blur filter to fill in the gaps and remove noise
-    if apply_filter:
-        dynamic_mask = cv2.medianBlur(dynamic_mask, 5)
-        # Convert back to binary mask
-        dynamic_mask = (255*(dynamic_mask > 0)).astype(np.uint8)
+    if not keep_color and img_sequence.ndim == 4 and img_sequence.shape[3] == 3:
+        img_sequence = np.stack(
+            [cv2.cvtColor(frame, cv2.COLOR_RGB2GRAY) for frame in img_sequence],
+            axis=0,
+        )
 
     # Split ultrasound video into ultrasound video and non-ultrasound image
-    ultrasound_part, non_ultrasound_part = img_sequence.copy(), img_sequence.copy()
-    ultrasound_part[:, ~dynamic_mask.astype(bool)] = 0
+    ultrasound_part = img_sequence.copy()
+    ultrasound_part[:, ~dynamic_mask] = 0
 
     # Extract static part of video
-    static_mask = ~dynamic_mask.astype(bool)
+    static_mask = ~dynamic_mask
 
     # Early return, if not cropping
     if not crop:
         return ultrasound_part, static_mask
 
-    # Get tightest crop of ultrasound image
-    y_min, y_max, x_min, x_max = create_tight_crop(dynamic_mask)
-    ultrasound_part = ultrasound_part[:, y_min:y_max, x_min:x_max]
-
-    return ultrasound_part, static_mask
+    return ultrasound_part[:, y_min:y_max, x_min:x_max], static_mask
 
 
 def extract_ultrasound_image_foreground(img, apply_filter=True, crop=True):
@@ -503,6 +593,11 @@ def extract_ultrasound_image_foreground(img, apply_filter=True, crop=True):
 
     # Split ultrasound image into ultrasound part and non-ultrasound part
     active_mask_bool = active_mask.astype(bool)
+    if not active_mask_bool.any():
+        raise EmptyMaskError(
+            "No ultrasound region could be found in this image; every pixel "
+            "in the sampled centre columns is below the intensity threshold."
+        )
     ultrasound_part, non_ultrasound_part = img.copy(), img.copy()
     ultrasound_part[~active_mask_bool] = 0
     static_mask = ~active_mask_bool
@@ -513,6 +608,11 @@ def extract_ultrasound_image_foreground(img, apply_filter=True, crop=True):
 
     # Get tightest crop of ultrasound image
     y_min, y_max, x_min, x_max = create_tight_crop(active_mask)
+    if y_min is None:
+        raise EmptyMaskError(
+            "The ultrasound region has no extent after filtering, so there is "
+            "nothing to crop to."
+        )
     ultrasound_part = ultrasound_part[y_min:y_max, x_min:x_max]
 
     return ultrasound_part, static_mask
@@ -541,31 +641,26 @@ def fill_mask(image, mask, intensity_threshold=1):
         gray_image = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
     else:
         gray_image = image
-    # Create a copy of the mask to update
-    filled_mask = mask.copy()
 
-    # Get the coordinates of the initial mask pixels
-    initial_points = np.argwhere(mask > 0)
+    seeds = np.asarray(mask) > 0
+    if not seeds.any():
+        return np.zeros(gray_image.shape, dtype=np.uint8)
 
-    # Define the 8-connected neighborhood
-    neighbors = [(-1, -1), (-1, 0), (-1, 1), (0, -1), (0, 1), (1, -1), (1, 0), (1, 1)]
+    # Region growing, as connected components rather than a per-pixel queue.
+    # The result is identical -- every above-threshold component 8-adjacent to
+    # a seed, plus the seeds themselves -- but it runs in OpenCV rather than in
+    # a Python loop over every pixel, which is the difference between minutes
+    # and milliseconds on a full-size frame.
+    bright = (gray_image > intensity_threshold).astype(np.uint8)
+    _, labels = cv2.connectedComponents(bright, connectivity=8)
 
-    # Use a deque for efficient queue operations
-    queue = deque(initial_points)
+    # Dilating the seeds by one pixel is what makes "8-adjacent to a seed"
+    # equivalent to "overlapping a dilated seed".
+    grown_seeds = cv2.dilate(seeds.astype(np.uint8), np.ones((3, 3), np.uint8))
+    touching = np.unique(labels[(grown_seeds > 0) & (labels > 0)])
 
-    # Region growing algorithm
-    while queue:
-        x, y = queue.popleft()
-        for dx, dy in neighbors:
-            nx, ny = x + dx, y + dy
-            if 0 <= nx < gray_image.shape[0] and 0 <= ny < gray_image.shape[1]:
-                if filled_mask[nx, ny] == 0 and gray_image[nx, ny] > intensity_threshold:
-                    filled_mask[nx, ny] = 255
-                    queue.append((nx, ny))
-
-    # Ensure mask is 0 or 255
-    filled_mask = np.where(filled_mask > 0, 255, 0).astype(np.uint8)
-    return filled_mask
+    filled_mask = np.isin(labels, touching) | seeds
+    return np.where(filled_mask, 255, 0).astype(np.uint8)
 
 
 def create_tight_crop(image):
