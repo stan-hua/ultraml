@@ -1,5 +1,5 @@
 fire
-opencv-python
+opencv-python-headless
 numpy
 joblib
 tqdm

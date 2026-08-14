@@ -18,6 +18,12 @@ cd ultraml
 pip install -e .
 ```
 
+To run the tests:
+```bash
+pip install pytest
+pytest tests/
+```
+
 
 ---
 ## Example Usages
@@ -48,7 +54,6 @@ background_save_path = "path/to/save/frames/background.png"
 save_paths, background_save_path = convert_dicom_to_frames(
     path=dicom_path,
     save_dir=dicom_save_dir,
-    prefix_fname="dicom_frame_",
     grayscale=True,
     uniform_num_samples=10,
     background_save_path=background_save_path,
@@ -65,7 +70,8 @@ video_frames_arr = ...        # list of numpy image arrays
 ultrasound_foreground, static_mask = extract_ultrasound_video_foreground(
     img_sequence=video_frames_arr,
     apply_filter=True,
-    crop=True
+    crop=True,
+    keep_color=False,         # set True for colour Doppler, see below
 )
 
 # Function returns: (i) the video frames with extracted foreground and
@@ -76,7 +82,38 @@ background_img = convert_img_to_uint8(first_img)
 background_img[~static_mask] = 0
 ```
 
-### 4. (Array-Level) Extract ultrasound from a single image
+By default the output is collapsed to grayscale, of shape `(T, H, W)`. Pass
+`keep_color=True` to keep the input's channels and get back `(T, H, W, C)` —
+needed for colour Doppler, where the flow overlay is the signal. The mask
+itself is always decided on luminance, so colour never determines *where* the
+beamform is.
+
+You can also tune the mask heuristics; these are forwarded to
+`compute_ultrasound_video_mask`:
+```python
+ultrasound_foreground, static_mask = extract_ultrasound_video_foreground(
+    img_sequence=video_frames_arr,
+    std_threshold=5,          # per-pixel variation over time to count as moving
+    intensity_threshold=15,   # brightness absorbed when connected to a moving pixel
+    blur_size=5,              # median blur kernel, odd
+)
+```
+
+### 4. (Array-Level) Locate the beamform without touching pixels
+Use this to store one bounding box per clip and apply it lazily, instead of
+materialising every extracted frame.
+```python
+from ultraml import compute_ultrasound_video_mask
+mask, (y_min, y_max, x_min, x_max) = compute_ultrasound_video_mask(
+    img_sequence=video_frames_arr,
+    apply_filter=True,
+)
+
+# `mask` is a boolean (H, W) array, True over the ultrasound region
+cropped = video_frames_arr[:, y_min:y_max, x_min:x_max]
+```
+
+### 5. (Array-Level) Extract ultrasound from a single image
 ```python
 from ultraml import extract_ultrasound_image_foreground
 img_arr = ...               # single numpy image array
@@ -92,3 +129,26 @@ ultrasound_foreground, static_mask = extract_ultrasound_image_foreground(
 background_img = convert_img_to_uint8(img_arr)
 background_img[~static_mask] = 0
 ```
+
+
+---
+## When no beamform can be found
+
+The extraction functions raise `EmptyMaskError` rather than returning a blank
+frame. An all-zero result is indistinguishable from a legitimately dark scan,
+so returning one silently poisons a dataset with blank samples. This happens
+when a clip is frozen (no pixel varies across the sequence), when a single
+frame is repeated, or when the region has no extent after filtering.
+
+Handle it per clip when running over a cohort:
+```python
+from ultraml import extract_ultrasound_video_foreground, EmptyMaskError
+
+try:
+    foreground, static_mask = extract_ultrasound_video_foreground(video_frames_arr)
+except EmptyMaskError as error:
+    print(f"Skipping clip: {error}")
+```
+
+`EmptyMaskError` subclasses `ValueError`, so existing `except ValueError`
+handlers still catch it.

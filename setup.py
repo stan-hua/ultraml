@@ -2,12 +2,12 @@ from setuptools import setup, find_packages
 
 setup(
     name="ultraml",
-    version="0.1.2",
+    version="0.2.0",
     packages=find_packages(),
     install_requires=[
         "fire",
         "joblib",
-        "opencv-python",
+        "opencv-python-headless",
         "numpy",
         "tqdm",
     ],
