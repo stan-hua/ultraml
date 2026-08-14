@@ -6,14 +6,12 @@ Description: Contains helper functions to extract ultrasound beamforms from
 """
 
 # Standard libraries
-import logging
 import os
 
 # Non-standard libraries
 import cv2
 import numpy as np
 from joblib import Parallel, delayed
-from tqdm import tqdm
 
 
 class EmptyMaskError(ValueError):
@@ -89,15 +87,23 @@ def convert_video_to_frames(
     # Simply return filenames if already exists
     if not overwrite and os.listdir(save_dir):
         print("[Video Conversion] Already exists, skipping...")
-        num_files = len(os.listdir(save_dir))
+        exist_fnames = os.listdir(save_dir)
+        # NOTE: The background may live in `save_dir`, and is not a frame
+        if background_save_path:
+            exist_fnames = [
+                fname for fname in exist_fnames
+                if fname != os.path.basename(background_save_path)
+            ]
         # Recreate filenames
-        idx = 1
-        paths = [f"{prefix_fname}{idx+i}.png" for i in range(num_files)]
-        assert set(paths) == set(os.listdir(save_dir)), (
-            f"Unexpected error! Previously extracted video frames have "
-            "unexpected file names. Please delete `{save_dir}`"
+        fnames = [f"{prefix_fname}{1+i}.png" for i in range(len(exist_fnames))]
+        assert set(fnames) == set(exist_fnames), (
+            "Unexpected error! Previously extracted video frames have "
+            f"unexpected file names. Please delete `{save_dir}`"
         )
-        return paths
+        paths = [f"{save_dir}/{fname}" for fname in fnames]
+        if background_save_path and not os.path.exists(background_save_path):
+            background_save_path = None
+        return paths, background_save_path
 
     # Convert video to frames
     vidcap = cv2.VideoCapture(path)
@@ -125,7 +131,7 @@ def convert_video_to_frames(
 
     # Early return, if no images extracted
     if not accum_imgs:
-        return []
+        return [], None
 
     # Separate out ultrasound & non-ultrasound part of sequence
     # CASE 1: Only 1 image frame
@@ -141,14 +147,16 @@ def convert_video_to_frames(
         cv2.imwrite(save_img_path, foreground[image_idx])
 
     # If specified, extract background image from first image
+    # NOTE: Taken from the processed frames, not the raw ones. The mask was
+    #       computed on these, and frame-level preprocessing may have cropped
+    #       them -- masking a raw frame with it raises IndexError
     if background_save_path and static_mask is not None:
-        first_img = frames_args[0][1]
+        first_img = accum_imgs[0]
         background_img = convert_img_to_uint8(first_img)
         background_img[~static_mask] = 0
         # NOTE: Only save if background image has at least 25 non-zero pixels
         if background_img.sum() >= 25:
-            os.makedirs(os.path.dirname(background_save_path), exist_ok=True)
-            cv2.imwrite(background_save_path, background_img)
+            _save_image(background_save_path, background_img)
         else:
             background_save_path = None
 
@@ -206,6 +214,10 @@ def convert_dicom_to_frames(
         "crop": True,
     }
     video_process_kwargs.update({k:v for k,v in kwargs.items() if k in video_process_kwargs})
+    # NOTE: A multiframe DICOM never reaches the frame-level preprocessing, so
+    #       `grayscale` has to be forwarded to the video-level call to mean
+    #       anything at all
+    video_process_kwargs["keep_color"] = not img_process_kwargs["grayscale"]
 
     # Lazy import to speed up file loading
     try:
@@ -296,8 +308,7 @@ def convert_dicom_to_frames(
         background_img[~static_mask] = 0
         # NOTE: Only save if background has at least `bg_min_pixels` non-zero pixels
         if background_img.sum() >= bg_min_pixels:
-            os.makedirs(os.path.dirname(background_save_path), exist_ok=True)
-            cv2.imwrite(background_save_path, background_img)
+            _save_image(background_save_path, background_img)
         else:
             background_save_path = None
 
@@ -323,9 +334,10 @@ def convert_img_to_uint8(img_arr):
         return img_arr
 
     # CASE 1: If image is UINT16, convert to UINT8 by dividing by 256
+    # NOTE: A dim scan whose max is below 256 is still valid UINT16; scale it
+    #       like any other rather than refusing it
     if img_arr.dtype == np.uint16:
         img_arr = img_arr.astype(np.float32)
-        assert img_arr.max() > 255, f"[UINT16 to UINT8] Image has pixel value > 255! Max: {img_arr.max()}"
         return np.clip((img_arr / 256), 0, 255).astype(np.uint8)
     # CASE 2: If image is between 0 and 1, then multiply by 255
     elif img_arr.min() >= 0 and img_arr.max() <= 1:
@@ -333,6 +345,25 @@ def convert_img_to_uint8(img_arr):
 
     # Raise error with unhandled dtype
     raise NotImplementedError(f"[UINT16 to UINT8] Unsupported image type! dtype: `{img_arr.dtype}`")
+
+
+def _save_image(save_path, img_arr):
+    """
+    Write an image, creating its parent directory if needed.
+
+    Parameters
+    ----------
+    save_path : str
+        Path to write the image to
+    img_arr : np.ndarray
+        Image array to write
+    """
+    # NOTE: `os.path.dirname` is empty for a bare filename, and `os.makedirs`
+    #       raises on an empty path
+    save_dir = os.path.dirname(save_path)
+    if save_dir:
+        os.makedirs(save_dir, exist_ok=True)
+    cv2.imwrite(save_path, img_arr)
 
 
 def preprocess_and_save_img_array(
@@ -372,10 +403,16 @@ def preprocess_and_save_img_array(
 
     # If specified, extract beamform part of ultrasound image
     if extract_beamform:
+        original_img = img_arr
         img_arr, static_mask = extract_ultrasound_image_foreground(img_arr, **kwargs)
         # Save background, if specified
+        # NOTE: Built by masking the original image, since `img_arr` may have
+        #       been cropped, and indexing it by the mask would flatten the
+        #       background to a 1-D strip of pixels rather than an image
         if background_save_path:
-            cv2.imwrite(background_save_path, img_arr[static_mask])
+            background_img = original_img.copy()
+            background_img[~static_mask] = 0
+            _save_image(background_save_path, background_img)
 
     # 2. Ensure grayscale image, if specified
     if grayscale and len(img_arr.shape) == 3 and img_arr.shape[2] == 3:
@@ -383,15 +420,15 @@ def preprocess_and_save_img_array(
 
     # Save image to file, if specified
     if save_path:
-        cv2.imwrite(save_path, img_arr)
+        _save_image(save_path, img_arr)
 
     return img_arr
 
 
 def is_image_dark(img_arr):
     """
-    Return True if image is more than 75% of the image is dark/black pixels,
-    and False otherwise
+    Return True if at least 60% of the image is dark/black pixels, and False
+    otherwise
 
     Parameters
     ----------
@@ -406,7 +443,6 @@ def is_image_dark(img_arr):
     # Convert to grayscale if not already
     if len(img_arr.shape) == 3 and img_arr.shape[2] == 3:
         img_arr = cv2.cvtColor(img_arr, cv2.COLOR_RGB2GRAY)
-    # Checks if more than 70% of the image is dark pixels
     return np.mean(img_arr < 30) >= 0.60
 
 
@@ -452,7 +488,9 @@ def compute_ultrasound_video_mask(
         If nothing in the sequence moves, or the mask has no extent. A frozen
         clip and a still image both land here.
     """
-    img_sequence = np.asarray(img_sequence).astype(np.uint8)
+    # NOTE: `.astype(np.uint8)` would wrap a 16-bit scan modulo 256 and hand
+    #       back a mask computed on noise, so scale instead
+    img_sequence = convert_img_to_uint8(np.asarray(img_sequence))
 
     # Judge motion on luminance; colour flow overlays should not decide where
     # the beamform is.
@@ -532,7 +570,7 @@ def extract_ultrasound_video_foreground(
     EmptyMaskError
         If no ultrasound region could be found
     """
-    img_sequence = np.asarray(img_sequence).astype(np.uint8)
+    img_sequence = convert_img_to_uint8(np.asarray(img_sequence))
     dynamic_mask, (y_min, y_max, x_min, x_max) = compute_ultrasound_video_mask(
         img_sequence, apply_filter=apply_filter, **mask_kwargs
     )
@@ -557,7 +595,7 @@ def extract_ultrasound_video_foreground(
     return ultrasound_part[:, y_min:y_max, x_min:x_max], static_mask
 
 
-def extract_ultrasound_image_foreground(img, apply_filter=True, crop=True):
+def extract_ultrasound_image_foreground(img, apply_filter=True, crop=True, keep_color=False):
     """
     Split ultrasound image into ultrasound (beamform) and non-ultrasound (unecessary static parts).
 
@@ -570,15 +608,29 @@ def extract_ultrasound_image_foreground(img, apply_filter=True, crop=True):
         If True, apply median blur filter to initial mask to remove noise
     crop : bool, optional
         If True, return cropped image
+    keep_color : bool, optional
+        If True, keep the input's channels instead of collapsing to grayscale.
+        Needed for colour Doppler, where the flow overlay is the signal.
 
     Returns
     -------
     (np.ndarray, np.ndarray)
-        (i) Ultrasound image with beamform extracted of shape (H, W), where
-            H and W can be smaller due to cropping
+        (i) Ultrasound image with beamform extracted, of shape (H, W) or
+            (H, W, C) when ``keep_color``. H and W can be smaller due to
+            cropping
         (ii) Boolean mask of shape (H, W) that highlights static parts of the
              image that denote the background
+
+    Raises
+    ------
+    EmptyMaskError
+        If no ultrasound region could be found
     """
+    # NOTE: `.astype(np.uint8)` would wrap a 16-bit scan modulo 256, and the
+    #       intensity thresholds below assume an 8-bit range
+    img = convert_img_to_uint8(np.asarray(img))
+    original_img = img
+
     # Get 10 points within 30% of the width at the center of the image
     width = img.shape[1]
     middle_idx = int(width * 0.5)
@@ -592,7 +644,7 @@ def extract_ultrasound_image_foreground(img, apply_filter=True, crop=True):
         is_colored_center_mask = (np.std(img[:, indices], axis=2) >= 5)
         img = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
 
-    # For center pixels that are greater than 50 and not colored, assume it's part of the mask
+    # For center pixels that are bright enough and not colored, assume it's part of the mask
     active_mask = np.zeros_like(img, dtype=bool)
     active_mask[:, indices] = (img[:, indices] >= 30) & (~is_colored_center_mask)
 
@@ -612,7 +664,9 @@ def extract_ultrasound_image_foreground(img, apply_filter=True, crop=True):
             "No ultrasound region could be found in this image; every pixel "
             "in the sampled centre columns is below the intensity threshold."
         )
-    ultrasound_part, non_ultrasound_part = img.copy(), img.copy()
+    # NOTE: `img` is grayscale by this point for a colour input, so the colour
+    #       output has to come from the original
+    ultrasound_part = (original_img if keep_color else img).copy()
     ultrasound_part[~active_mask_bool] = 0
     static_mask = ~active_mask_bool
 

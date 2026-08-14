@@ -13,9 +13,10 @@ setup(
     ],
     entry_points={
         "console_scripts": [
-            "ultraml=ultraml.core.extract:main",
+            "ultraml=ultraml.cli:main",
         ],
     },
+    python_requires=">=3.8",
     author="Stanley Bryan Zamora Hua",
     author_email="stanley.z.hua@gmail.com",
     description="A simple package for preprocessing ultrasound imaging data for machine learning",

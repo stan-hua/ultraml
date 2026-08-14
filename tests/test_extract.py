@@ -18,10 +18,13 @@ from ultraml.core.extract import (
     EmptyMaskError,
     compute_ultrasound_video_mask,
     convert_dicom_to_frames,
+    convert_img_to_uint8,
+    convert_video_to_frames,
     create_tight_crop,
     extract_ultrasound_image_foreground,
     extract_ultrasound_video_foreground,
     fill_mask,
+    preprocess_and_save_img_array,
 )
 
 H, W = 120, 160
@@ -289,3 +292,107 @@ class TestConvertDicomToFrames:
             convert_dicom_to_frames(
                 path=dicom_path, save_dir=str(tmp_path / "frames"),
             )
+
+
+def write_video(path, clip):
+    """Write a clip to an .mp4, skipping the test if no codec is available."""
+    writer = cv2.VideoWriter(
+        str(path), cv2.VideoWriter_fourcc(*"mp4v"), 10, (clip.shape[2], clip.shape[1])
+    )
+    if not writer.isOpened():
+        pytest.skip("No mp4 encoder available in this environment")
+    for frame in clip:
+        writer.write(cv2.cvtColor(frame, cv2.COLOR_GRAY2BGR))
+    writer.release()
+    return str(path)
+
+
+class TestUint8Conversion:
+    """Scaling, rather than wrapping, whatever bit depth arrives."""
+
+    def test_a_dim_16_bit_scan_is_scaled_not_rejected(self):
+        """A UINT16 image whose max is below 256 is still valid UINT16."""
+        img = (np.ones((8, 8)) * 200).astype(np.uint16)
+        out = convert_img_to_uint8(img)
+        assert out.dtype == np.uint8
+        assert out.max() == 0  # 200 / 256 rounds down, but does not raise
+
+    def test_a_16_bit_clip_is_scaled_before_masking(self):
+        """`.astype(np.uint8)` would wrap these values modulo 256."""
+        clip_8bit = make_clip(n_frames=8)
+        clip_16bit = (clip_8bit.astype(np.uint16) * 256)
+        _, bbox_8bit = compute_ultrasound_video_mask(clip_8bit)
+        _, bbox_16bit = compute_ultrasound_video_mask(clip_16bit)
+        assert bbox_16bit == bbox_8bit
+
+
+class TestBackgroundIsAnImage:
+    """The background must be saved as a picture, not a bag of pixels."""
+
+    def test_the_saved_background_keeps_its_shape(self, tmp_path):
+        img = make_clip(n_frames=1)[0]
+        background_path = tmp_path / "nested" / "background.png"
+        preprocess_and_save_img_array(
+            img,
+            extract_beamform=True,
+            crop=False,
+            background_save_path=str(background_path),
+        )
+        saved = cv2.imread(str(background_path), cv2.IMREAD_UNCHANGED)
+        assert saved.shape[:2] == img.shape[:2]
+
+    def test_a_bare_filename_needs_no_directory(self, tmp_path, monkeypatch):
+        """`os.path.dirname` is empty here, and `os.makedirs` rejects that."""
+        monkeypatch.chdir(tmp_path)
+        preprocess_and_save_img_array(make_clip(n_frames=1)[0], save_path="frame.png")
+        assert os.path.exists(tmp_path / "frame.png")
+
+
+class TestKeepColorOnImages:
+    """Single-image extraction mirrors the video function's colour handling."""
+
+    def test_colour_survives_when_asked_for(self):
+        img = make_clip(n_frames=1, colour=True)[0]
+        out, _ = extract_ultrasound_image_foreground(img, keep_color=True)
+        assert out.ndim == 3 and out.shape[2] == 3
+
+    def test_grayscale_remains_the_default(self):
+        img = make_clip(n_frames=1, colour=True)[0]
+        out, _ = extract_ultrasound_image_foreground(img)
+        assert out.ndim == 2
+
+
+class TestConvertVideoToFrames:
+    """The video entry point, including the paths that returned wrong shapes."""
+
+    def test_frames_are_written(self, tmp_path):
+        video_path = write_video(tmp_path / "clip.mp4", make_clip(n_frames=6))
+        paths, _ = convert_video_to_frames(
+            path=video_path, save_dir=str(tmp_path / "frames"), prefix_fname="frame_",
+        )
+        assert len(paths) == 6
+        assert all(os.path.exists(p) for p in paths)
+
+    def test_a_background_alongside_cropping_does_not_raise(self, tmp_path):
+        """Frame-level cropping shrinks the frames the mask is computed on."""
+        video_path = write_video(tmp_path / "clip.mp4", make_clip(n_frames=6))
+        paths, _ = convert_video_to_frames(
+            path=video_path,
+            save_dir=str(tmp_path / "frames"),
+            background_save_path=str(tmp_path / "bg" / "background.png"),
+            crop=True,
+        )
+        assert len(paths) == 6
+
+    def test_rerunning_returns_the_documented_pair(self, tmp_path):
+        """The skip path used to return a bare list of filenames."""
+        video_path = write_video(tmp_path / "clip.mp4", make_clip(n_frames=6))
+        save_dir = str(tmp_path / "frames")
+        convert_video_to_frames(
+            path=video_path, save_dir=save_dir, prefix_fname="frame_",
+        )
+        paths, background = convert_video_to_frames(
+            path=video_path, save_dir=save_dir, prefix_fname="frame_",
+        )
+        assert len(paths) == 6
+        assert background is None

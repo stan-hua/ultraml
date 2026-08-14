@@ -44,6 +44,12 @@ pip install -e .
 
 ## Quickstart
 
+From the command line:
+```bash
+ultraml video --path=scan.mp4 --save_dir=frames/
+```
+
+Or from Python:
 ```python
 from ultraml import convert_video_to_frames
 
@@ -55,6 +61,38 @@ save_paths, background_path = convert_video_to_frames(
 )
 print(f"{len(save_paths)} frames written")
 ```
+
+
+## Command line
+
+Installing the package puts an `ultraml` command on your path, so a cohort can
+be preprocessed without writing any Python. Three commands:
+
+```bash
+# A single video
+ultraml video --path=scan.mp4 --save_dir=frames/
+
+# A single DICOM, evenly sampling 10 frames
+ultraml dicom --path=scan.dcm --save_dir=frames/ --uniform_num_samples=10
+
+# Every video and DICOM under a directory, one sub-directory of frames each
+ultraml batch --in_dir=studies/ --save_dir=frames/
+```
+
+`batch` reports what it could not use and keeps going, rather than letting one
+frozen clip abort the run:
+
+```
+Converted 41/43 inputs (1284 frames) to `frames/`
+Skipped 2:
+	studies/scan_07.dcm
+		No pixel varies across the sequence, so no ultrasound region could be found. The clip is frozen, or a single repeated frame.
+```
+
+Every command takes `--prefix_fname`, `--background_save_path`, `--overwrite`,
+`--grayscale`, `--crop`, and `--apply_filter`. Flags you do not pass keep the
+library's defaults. Run `ultraml --help`, or `ultraml video --help`, for the
+full list.
 
 
 ## Usage
@@ -162,17 +200,20 @@ foreground, static_mask = extract_ultrasound_image_foreground(
     img=img_arr,              # single (H, W) or (H, W, C) numpy array
     apply_filter=True,
     crop=True,
+    keep_color=False,
 )
 ```
+
+With no time axis to exploit, the region is estimated from intensity down the
+centre columns instead.
 </details>
 
 
 ## Colour Doppler
 
-Video extraction collapses to grayscale by default, returning `(T, H, W)`.
-Pass `keep_color=True` to keep the input's channels and get back
-`(T, H, W, C)` — needed for colour Doppler, where the flow overlay *is* the
-signal:
+Extraction collapses to grayscale by default, returning `(T, H, W)` for a clip
+and `(H, W)` for an image. Pass `keep_color=True` to keep the input's channels
+— needed for colour Doppler, where the flow overlay *is* the signal:
 
 ```python
 foreground, static_mask = extract_ultrasound_video_foreground(
@@ -181,8 +222,13 @@ foreground, static_mask = extract_ultrasound_video_foreground(
 )
 ```
 
-The mask is always decided on luminance, so colour never determines *where*
-the beamform is — only what survives inside it.
+The same flag works on `extract_ultrasound_image_foreground`, and on the CLI
+as `--grayscale=False`. The mask is always decided on luminance, so colour
+never determines *where* the beamform is — only what survives inside it.
+
+Input is scaled to 8-bit before masking, so 16-bit DICOM pixel data is handled
+without wrapping. Float input outside `[0, 1]` is rejected rather than
+truncated.
 
 
 ## Tuning the mask
@@ -242,8 +288,8 @@ handlers still catch it.
 | `extract_ultrasound_video_foreground(img_sequence, ...)` | Clip array → beamform-only clip + background mask |
 | `compute_ultrasound_video_mask(img_sequence, ...)` | Clip array → boolean mask + bounding box, pixels untouched |
 | `extract_ultrasound_image_foreground(img, ...)` | Image array → beamform-only image + background mask |
-| `convert_img_to_uint8(img_arr)` | Normalise an image array to `uint8` |
-| `is_image_dark(img_arr)` | Whether a frame is mostly dark pixels |
+| `convert_img_to_uint8(img_arr)` | Scale an image array to `uint8` |
+| `is_image_dark(img_arr)` | Whether at least 60% of a frame is dark pixels |
 
 Both file-level functions forward extra keyword arguments to the frame-level
 preprocessing, which accepts `grayscale`, `extract_beamform`, `crop`, and
@@ -258,7 +304,8 @@ pip install pytest pydicom
 pytest tests/
 ```
 
-The DICOM tests skip automatically if `pydicom` is not installed.
+The DICOM tests skip automatically if `pydicom` is not installed, and the
+video tests skip if no mp4 encoder is available.
 
 
 ## License
