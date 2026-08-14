@@ -5,6 +5,7 @@ static bright "annotation" text-like marks that must be excluded.
 """
 
 # Standard libraries
+import os
 from collections import deque
 
 # Non-standard libraries
@@ -16,6 +17,7 @@ import pytest
 from ultraml.core.extract import (
     EmptyMaskError,
     compute_ultrasound_video_mask,
+    convert_dicom_to_frames,
     create_tight_crop,
     extract_ultrasound_image_foreground,
     extract_ultrasound_video_foreground,
@@ -195,3 +197,95 @@ class TestTightCrop:
         mask[5:15, 6:16] = 255
         y_min, y_max, x_min, x_max = create_tight_crop(mask)
         assert (y_min, y_max, x_min, x_max) == (5, 15, 6, 16)
+
+
+def write_dicom(path, arr):
+    """Write a minimal uncompressed ultrasound DICOM holding `arr`.
+
+    A (H, W) array becomes a single-image DICOM with no NumberOfFrames; a
+    (T, H, W) array becomes a multiframe one.
+    """
+    # pydicom is an optional dependency, so skip rather than fail without it
+    pytest.importorskip("pydicom")
+    from pydicom.dataset import Dataset, FileMetaDataset
+    from pydicom.uid import ExplicitVRLittleEndian, generate_uid
+
+    ds = Dataset()
+    ds.file_meta = FileMetaDataset()
+    ds.file_meta.MediaStorageSOPClassUID = generate_uid()
+    ds.file_meta.MediaStorageSOPInstanceUID = generate_uid()
+    ds.file_meta.TransferSyntaxUID = ExplicitVRLittleEndian
+    ds.SOPClassUID = ds.file_meta.MediaStorageSOPClassUID
+    ds.SOPInstanceUID = ds.file_meta.MediaStorageSOPInstanceUID
+    if arr.ndim == 3:
+        ds.NumberOfFrames = arr.shape[0]
+    ds.Rows, ds.Columns = arr.shape[-2], arr.shape[-1]
+    ds.SamplesPerPixel = 1
+    ds.PhotometricInterpretation = "MONOCHROME2"
+    ds.BitsAllocated = 8
+    ds.BitsStored = 8
+    ds.HighBit = 7
+    ds.PixelRepresentation = 0
+    ds.PixelData = arr.astype(np.uint8).tobytes()
+    ds.save_as(str(path), enforce_file_format=True)
+    return str(path)
+
+
+class TestConvertDicomToFrames:
+    """The DICOM entry point, which was unreachable before it had a test."""
+
+    def test_a_multiframe_dicom_yields_one_file_per_frame(self, tmp_path):
+        dicom_path = write_dicom(tmp_path / "clip.dcm", make_clip(n_frames=8))
+        save_dir = tmp_path / "frames"
+        paths, background = convert_dicom_to_frames(
+            path=dicom_path, save_dir=str(save_dir), prefix_fname="frame_",
+        )
+        assert len(paths) == 8
+        assert all(os.path.exists(p) for p in paths)
+        assert background is None
+
+    def test_a_single_image_dicom_does_not_look_for_frame_count(self, tmp_path):
+        """The single-image branch used to fall through into NumberOfFrames."""
+        dicom_path = write_dicom(tmp_path / "still.dcm", make_clip(n_frames=1)[0])
+        save_dir = tmp_path / "frames"
+        paths, _ = convert_dicom_to_frames(path=dicom_path, save_dir=str(save_dir))
+        assert len(paths) == 1
+        assert os.path.exists(paths[0])
+
+    def test_uniform_sampling_takes_the_requested_count(self, tmp_path):
+        dicom_path = write_dicom(tmp_path / "clip.dcm", make_clip(n_frames=12))
+        paths, _ = convert_dicom_to_frames(
+            path=dicom_path,
+            save_dir=str(tmp_path / "frames"),
+            uniform_num_samples=4,
+        )
+        assert len(paths) == 4
+
+    def test_the_prefix_reaches_the_filenames(self, tmp_path):
+        dicom_path = write_dicom(tmp_path / "clip.dcm", make_clip(n_frames=4))
+        paths, _ = convert_dicom_to_frames(
+            path=dicom_path,
+            save_dir=str(tmp_path / "frames"),
+            prefix_fname="scan_",
+        )
+        assert all(os.path.basename(p).startswith("scan_") for p in paths)
+
+    def test_rerunning_returns_the_same_paths_without_redoing_work(self, tmp_path):
+        """The skip path returns the same (paths, background) shape as a real run."""
+        dicom_path = write_dicom(tmp_path / "clip.dcm", make_clip(n_frames=5))
+        save_dir = str(tmp_path / "frames")
+        first, _ = convert_dicom_to_frames(
+            path=dicom_path, save_dir=save_dir, prefix_fname="frame_",
+        )
+        second, _ = convert_dicom_to_frames(
+            path=dicom_path, save_dir=save_dir, prefix_fname="frame_",
+        )
+        assert sorted(second) == sorted(first)
+
+    def test_a_frozen_clip_raises_rather_than_saving_blanks(self, tmp_path):
+        frozen = np.repeat(make_clip(n_frames=1), 6, axis=0)
+        dicom_path = write_dicom(tmp_path / "frozen.dcm", frozen)
+        with pytest.raises(EmptyMaskError):
+            convert_dicom_to_frames(
+                path=dicom_path, save_dir=str(tmp_path / "frames"),
+            )

@@ -156,7 +156,7 @@ def convert_video_to_frames(
 
 
 def convert_dicom_to_frames(
-        path, save_dir, 
+        path, save_dir, prefix_fname="",
         uniform_num_samples=-1,
         background_save_path=None,
         bg_min_pixels=25,
@@ -219,15 +219,23 @@ def convert_dicom_to_frames(
     # Simply return filenames if already exists
     if not overwrite and os.listdir(save_dir):
         print("[DICOM Conversion] Already exists, skipping...")
-        exist_paths = os.listdir(save_dir)
-        num_files = len(exist_paths)
+        exist_fnames = os.listdir(save_dir)
+        # NOTE: The background may live in `save_dir`, and is not a frame
+        if background_save_path:
+            exist_fnames = [
+                fname for fname in exist_fnames
+                if fname != os.path.basename(background_save_path)
+            ]
         # Recreate filenames
-        paths = [f"{prefix_fname}{1+i}.png" for i in range(num_files)]
-        assert set(paths) == set(exist_paths), (
+        fnames = [f"{prefix_fname}{1+i}.png" for i in range(len(exist_fnames))]
+        assert set(fnames) == set(exist_fnames), (
             "Unexpected error! Previously extracted video frames have "
             f"unexpected file names. Please delete `{save_dir}`"
         )
-        return paths
+        paths = [f"{save_dir}/{fname}" for fname in fnames]
+        if background_save_path and not os.path.exists(background_save_path):
+            background_save_path = None
+        return paths, background_save_path
 
     # Load DICOM
     assert os.path.exists(path), f"DICOM does not exist at path! \n\tPath: {path}"
@@ -236,14 +244,20 @@ def convert_dicom_to_frames(
     # CASE 1: A single image
     if not hasattr(dicom_obj, "NumberOfFrames"):
         img_arr = dicom_obj.pixel_array
+        save_path = f"{save_dir}/{prefix_fname}1.png"
 
         # Preprocess image and save to path
         preprocess_and_save_img_array(
             img_arr,
-            save_path=f"{save_dir}/{prefix_fname}1.png",
+            save_path=save_path,
             background_save_path=background_save_path,
             **img_process_kwargs,
         )
+
+        # NOTE: The background is only written if beamform extraction was on
+        if background_save_path and not os.path.exists(background_save_path):
+            background_save_path = None
+        return [save_path], background_save_path
 
     # CASE 2: A sequence of image frames
     num_frames = int(dicom_obj.NumberOfFrames)
@@ -277,10 +291,10 @@ def convert_dicom_to_frames(
 
     # If specified, extract background image from first image
     if background_save_path and static_mask is not None:
-        first_img = frames_args[0][1]
+        first_img = accum_imgs[0]
         background_img = convert_img_to_uint8(first_img)
         background_img[~static_mask] = 0
-        # NOTE: Only save if background image has at least 25 non-zero pixels
+        # NOTE: Only save if background has at least `bg_min_pixels` non-zero pixels
         if background_img.sum() >= bg_min_pixels:
             os.makedirs(os.path.dirname(background_save_path), exist_ok=True)
             cv2.imwrite(background_save_path, background_img)
